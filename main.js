@@ -2,9 +2,15 @@ const glados = async () => {
   const notice = []
   let hasError = false
 
+  // ==========================================================
+  // 检查 Secret
+  // ==========================================================
+
   if (!process.env.GLADOS) {
     console.error('[GLaDOS] GLADOS secret is missing')
+
     process.exitCode = 1
+
     return [
       'Checkin Error',
       'GLADOS secret is missing',
@@ -12,9 +18,20 @@ const glados = async () => {
     ]
   }
 
-  // =========================
+  // ==========================================================
   // 读取多账号 Cookie / UA
-  // =========================
+  //
+  // GLADOS:
+  // cookie_account_1
+  // cookie_account_2
+  //
+  // GLADOS_UA:
+  // ua_account_1
+  // ua_account_2
+  //
+  // 如果 GLADOS_UA 只有一行，则所有账号共用这一 UA。
+  // ==========================================================
+
   const cookies = String(process.env.GLADOS)
     .split('\n')
     .map(x => x.trim())
@@ -27,49 +44,75 @@ const glados = async () => {
 
   const domain = String(
     process.env.DOMAIN || 'glados.cloud'
-  ).trim()
+  )
+    .trim()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/+$/, '')
 
   console.log(`[GLaDOS] domain=${domain}`)
   console.log(`[GLaDOS] accounts=${cookies.length}`)
   console.log(`[GLaDOS] UA count=${agents.length}`)
   console.log(`[GLaDOS] UA configured=${agents.length > 0}`)
 
-  // =========================
+  // ==========================================================
+  // 检查是否属于“今天已经签到”
+  // ==========================================================
+
+  const isAlreadyChecked = (action) => {
+    const message = String(action?.message || '').toLowerCase()
+
+    const knownMessages = [
+      "today's observation logged",
+      'today’s observation logged',
+      'checkin repeats',
+      'check-in repeats',
+      'already checked',
+      'already checkin',
+      'already checked in',
+      'already signed',
+    ]
+
+    return knownMessages.some(text => message.includes(text))
+  }
+
+  // ==========================================================
   // 逐账号签到
-  // =========================
+  // ==========================================================
+
   for (const [index, cookie] of cookies.entries()) {
     const accountNo = index + 1
 
     try {
-      // 多账号时按行对应 UA。
-      // 如果只有一个 UA，则所有账号共用。
       const userAgent =
         agents[index] ||
         agents[0] ||
         'Mozilla/5.0'
 
       const commonHeaders = {
-        'cookie': cookie,
-        'referer': `https://${domain}/console/checkin`,
+        cookie,
+        referer: `https://${domain}/console/checkin`,
         'user-agent': userAgent,
-        'accept': 'application/json, text/plain, */*',
+        accept: 'application/json, text/plain, */*',
       }
 
       console.log(
         `[GLaDOS] Account ${accountNo}: checking in...`
       )
 
-      // =========================
-      // Checkin
-      // =========================
+      // ======================================================
+      // 签到 API
+      // ======================================================
+
       const checkinResponse = await fetch(
         `https://${domain}/api/user/checkin`,
         {
           method: 'POST',
+
           headers: {
             ...commonHeaders,
             'content-type': 'application/json',
           },
+
           body: JSON.stringify({
             token: domain,
           }),
@@ -90,14 +133,17 @@ const glados = async () => {
         )
       }
 
+      const actionCode = action?.code
+
       console.log(
         `[GLaDOS] Account ${accountNo}: ` +
         `HTTP=${checkinResponse.status}, ` +
-        `code=${action?.code ?? 'N/A'}, ` +
+        `code=${actionCode ?? 'N/A'}, ` +
         `message=${action?.message ?? 'N/A'}` +
         `${action?.reason ? `, reason=${action.reason}` : ''}`
       )
 
+      // HTTP 本身异常
       if (!checkinResponse.ok) {
         throw new Error(
           `HTTP ${checkinResponse.status}: ` +
@@ -105,17 +151,49 @@ const glados = async () => {
         )
       }
 
-      if (action?.code) {
+      // ======================================================
+      // 判断签到结果
+      //
+      // code=0:
+      //   正常签到成功
+      //
+      // code=1 + Today's observation logged:
+      //   今天已经签到，不是错误
+      //
+      // code=-2:
+      //   没有权限，Cookie / UA 等鉴权问题
+      // ======================================================
+
+      const alreadyChecked = isAlreadyChecked(action)
+
+      const checkinSuccess =
+        actionCode === 0 ||
+        alreadyChecked
+
+      if (!checkinSuccess) {
         throw new Error(
           `${action?.message || 'Checkin failed'} ` +
-          `(code=${action?.code}` +
+          `(code=${actionCode ?? 'unknown'}` +
           `${action?.reason ? `, reason=${action.reason}` : ''})`
         )
       }
 
-      // =========================
+      if (alreadyChecked) {
+        console.log(
+          `[GLaDOS] Account ${accountNo}: ` +
+          `already checked today`
+        )
+      } else {
+        console.log(
+          `[GLaDOS] Account ${accountNo}: ` +
+          `checkin accepted`
+        )
+      }
+
+      // ======================================================
       // 查询账号状态
-      // =========================
+      // ======================================================
+
       console.log(
         `[GLaDOS] Account ${accountNo}: getting status...`
       )
@@ -163,19 +241,33 @@ const glados = async () => {
         )
       }
 
-      const leftDays = Number(
-        status?.data?.leftDays
-      )
+      // ======================================================
+      // 剩余天数
+      // ======================================================
+
+      const leftDaysRaw = status?.data?.leftDays
+      const leftDays = Number(leftDaysRaw)
+
+      const leftDaysText =
+        Number.isFinite(leftDays)
+          ? leftDays
+          : leftDaysRaw ?? 'N/A'
+
+      const stateText =
+        alreadyChecked
+          ? 'Already checked today'
+          : 'Checkin OK'
 
       console.log(
-        `[GLaDOS] Account ${accountNo}: SUCCESS, ` +
-        `Left Days=${leftDays}`
+        `[GLaDOS] Account ${accountNo}: ` +
+        `${alreadyChecked ? 'ALREADY CHECKED' : 'SUCCESS'}, ` +
+        `Left Days=${leftDaysText}`
       )
 
       notice.push(
-        `Account ${accountNo} - Checkin OK`,
-        `${action?.message || 'Checkin success'}`,
-        `Left Days ${leftDays}`
+        `Account ${accountNo} - ${stateText}`,
+        `${action?.message || stateText}`,
+        `Left Days ${leftDaysText}`
       )
 
     } catch (error) {
@@ -185,7 +277,8 @@ const glados = async () => {
         error?.message || String(error)
 
       console.error(
-        `[GLaDOS] Account ${accountNo}: ERROR: ${errorMessage}`
+        `[GLaDOS] Account ${accountNo}: ` +
+        `ERROR: ${errorMessage}`
       )
 
       notice.push(
@@ -196,8 +289,12 @@ const glados = async () => {
     }
   }
 
-  // 不在这里直接 throw，
-  // 先让通知函数把签到结果发送出去。
+  // ==========================================================
+  // 有任一账号真正失败，则最终 Action 标记失败。
+  //
+  // 不立即 throw，这样仍然可以先发送通知。
+  // ==========================================================
+
   if (hasError) {
     process.exitCode = 1
   }
@@ -223,10 +320,12 @@ const notify = async (notice) => {
   for (const option of options) {
     try {
 
-      // =========================
+      // ======================================================
       // Console
-      // =========================
+      // ======================================================
+
       if (option.startsWith('console:')) {
+        console.log('')
         console.log('========== NOTICE ==========')
 
         for (const line of notice) {
@@ -234,11 +333,15 @@ const notify = async (notice) => {
         }
 
         console.log('============================')
+        console.log('')
       }
 
-      // =========================
+      // ======================================================
       // WxPusher
-      // =========================
+      // 格式:
+      // wxpusher:{token}:{uid}
+      // ======================================================
+
       else if (option.startsWith('wxpusher:')) {
         const parts = option.split(':')
 
@@ -249,9 +352,11 @@ const notify = async (notice) => {
           'https://wxpusher.zjiecode.com/api/send/message',
           {
             method: 'POST',
+
             headers: {
               'content-type': 'application/json',
             },
+
             body: JSON.stringify({
               appToken,
               summary: notice[0],
@@ -269,9 +374,12 @@ const notify = async (notice) => {
         }
       }
 
-      // =========================
+      // ======================================================
       // PushPlus
-      // =========================
+      // 格式:
+      // pushplus:{token}
+      // ======================================================
+
       else if (option.startsWith('pushplus:')) {
         const token = option.split(':')[1]
 
@@ -279,9 +387,11 @@ const notify = async (notice) => {
           'https://www.pushplus.plus/send',
           {
             method: 'POST',
+
             headers: {
               'content-type': 'application/json',
             },
+
             body: JSON.stringify({
               token,
               title: notice[0],
@@ -298,9 +408,12 @@ const notify = async (notice) => {
         }
       }
 
-      // =========================
+      // ======================================================
       // Bark
-      // =========================
+      // 格式:
+      // bark:{key}
+      // ======================================================
+
       else if (option.startsWith('bark:')) {
         const key = option.split(':')[1]
 
@@ -308,9 +421,11 @@ const notify = async (notice) => {
           `https://api.day.app/${key}`,
           {
             method: 'POST',
+
             headers: {
               'content-type': 'application/json',
             },
+
             body: JSON.stringify({
               title: notice[0],
               body: notice.slice(1).join('\n'),
@@ -325,9 +440,12 @@ const notify = async (notice) => {
         }
       }
 
-      // =========================
+      // ======================================================
       // 企业微信机器人
-      // =========================
+      // 格式:
+      // qyweixin:{key}
+      // ======================================================
+
       else if (option.startsWith('qyweixin:')) {
         const qyweixinToken =
           option.split(':')[1]
@@ -340,11 +458,14 @@ const notify = async (notice) => {
           url,
           {
             method: 'POST',
+
             headers: {
               'content-type': 'application/json',
             },
+
             body: JSON.stringify({
               msgtype: 'markdown',
+
               markdown: {
                 content: notice.join('<br>')
               }
@@ -371,18 +492,23 @@ const notify = async (notice) => {
         }
       }
 
-      // =========================
-      // 兼容旧版：
-      // 只有 token 时默认 PushPlus
-      // =========================
+      // ======================================================
+      // 兼容旧版
+      //
+      // 如果 NOTIFY 中只有 token，没有前缀，
+      // 默认按 PushPlus 处理。
+      // ======================================================
+
       else {
         const response = await fetch(
           'https://www.pushplus.plus/send',
           {
             method: 'POST',
+
             headers: {
               'content-type': 'application/json',
             },
+
             body: JSON.stringify({
               token: option,
               title: notice[0],
@@ -406,7 +532,7 @@ const notify = async (notice) => {
       )
 
       // 通知失败也标记 Action 失败，
-      // 但继续尝试其他通知渠道。
+      // 但继续尝试其余通知渠道。
       process.exitCode = 1
     }
   }
