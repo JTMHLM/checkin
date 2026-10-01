@@ -4,12 +4,14 @@ const glados = async () => {
   for (const cookie of String(process.env.GLADOS).split('\n')) {
     if (!cookie) continue
     try {
-      const domain = process.env.DOMAIN || 'glados.one'
-      const common = {
-        'cookie': cookie,
-        'referer': `https://${domain}/console/checkin`,
-        'user-agent': 'Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 6.0)',
-      }
+        const domain = process.env.DOMAIN || 'glados.cloud'
+
+        const common = {
+          'cookie': cookie,
+          'referer': `https://${domain}/console/checkin`,
+          'user-agent': process.env.GLADOS_UA || 'Mozilla/5.0',
+          'accept': 'application/json, text/plain, */*',
+}
       const action = await fetch(`https://${domain}/api/user/checkin`, {
         method: 'POST',
         headers: { ...common, 'content-type': 'application/json' },
