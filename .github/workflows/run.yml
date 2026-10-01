@@ -2,26 +2,42 @@ name: run
 
 on:
   workflow_dispatch:
+
   push:
+    branches:
+      - main
+
   schedule:
-    - cron: 10 16 * * *
+    # UTC 16:10 = 北京时间次日 00:10
+    - cron: '10 16 * * *'
+
 
 jobs:
   run:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: 22
+          cache: npm
 
-      - run: npm ci
+      - name: Install dependencies
+        run: npm ci
 
-      - run: npm run main
+      - name: Run GLaDOS checkin
+        run: npm run main
         env:
           GLADOS: ${{ secrets.GLADOS }}
           GLADOS_UA: ${{ secrets.GLADOS_UA }}
-          DOMAIN: glados.cloud
+
+          # DOMAIN 不设置时 main.js 自动使用 glados.cloud。
+          # 如果账号迁移到 railgun.info，
+          # 在 Repository Secrets 中增加 DOMAIN=railgun.info 即可。
+          DOMAIN: ${{ secrets.DOMAIN }}
+
           NOTIFY: ${{ secrets.NOTIFY }}
