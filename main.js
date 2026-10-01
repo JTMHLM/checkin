@@ -1,119 +1,173 @@
 const glados = async () => {
   const notice = []
-  if (!process.env.GLADOS) return
-  for (const cookie of String(process.env.GLADOS).split('\n')) {
-    if (!cookie) continue
-    try {
-        const domain = process.env.DOMAIN || 'glados.cloud'
+  let hasError = false
 
-        const common = {
-          'cookie': cookie,
-          'referer': `https://${domain}/console/checkin`,
-          'user-agent': process.env.GLADOS_UA || 'Mozilla/5.0',
-          'accept': 'application/json, text/plain, */*',
-}
-      const action = await fetch(`https://${domain}/api/user/checkin`, {
-        method: 'POST',
-        headers: { ...common, 'content-type': 'application/json' },
-        body: JSON.stringify({ token: domain }),
-      }).then((r) => r.json())
-      if (action?.code) throw new Error(action?.message)
-      const status = await fetch(`https://${domain}/api/user/status`, {
-        method: 'GET',
-        headers: { ...common },
-      }).then((r) => r.json())
-      if (status?.code) throw new Error(status?.message)
-      notice.push(
-        'Checkin OK',
-        `${action?.message}`,
-        `Left Days ${Number(status?.data?.leftDays)}`
+  if (!process.env.GLADOS) {
+    console.error('[GLaDOS] GLADOS secret is missing')
+    process.exitCode = 1
+    return ['Checkin Error', 'GLADOS secret is missing']
+  }
+
+  const cookies = String(process.env.GLADOS)
+    .split('\n')
+    .map(x => x.trim())
+    .filter(Boolean)
+
+  const agents = String(process.env.GLADOS_UA || '')
+    .split('\n')
+    .map(x => x.trim())
+    .filter(Boolean)
+
+  const domain = process.env.DOMAIN || 'glados.cloud'
+
+  console.log(`[GLaDOS] domain=${domain}`)
+  console.log(`[GLaDOS] accounts=${cookies.length}`)
+  console.log(`[GLaDOS] UA configured=${agents.length > 0}`)
+
+  for (const [index, cookie] of cookies.entries()) {
+    const accountNo = index + 1
+
+    try {
+      const userAgent =
+        agents[index] ||
+        agents[0] ||
+        'Mozilla/5.0'
+
+      const common = {
+        cookie,
+        referer: `https://${domain}/console/checkin`,
+        'user-agent': userAgent,
+        accept: 'application/json, text/plain, */*',
+      }
+
+      console.log(`[GLaDOS] Account ${accountNo}: checking in...`)
+
+      const checkinResponse = await fetch(
+        `https://${domain}/api/user/checkin`,
+        {
+          method: 'POST',
+          headers: {
+            ...common,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ token: domain }),
+        }
       )
-    } catch (error) {
+
+      const checkinText = await checkinResponse.text()
+
+      let action
+      try {
+        action = JSON.parse(checkinText)
+      } catch {
+        throw new Error(
+          `Checkin API returned non-JSON response ` +
+          `(HTTP ${checkinResponse.status}): ` +
+          checkinText.slice(0, 200)
+        )
+      }
+
+      console.log(
+        `[GLaDOS] Account ${accountNo}: ` +
+        `HTTP=${checkinResponse.status}, ` +
+        `code=${action?.code ?? 'N/A'}, ` +
+        `message=${action?.message ?? 'N/A'}`
+      )
+
+      if (!checkinResponse.ok) {
+        throw new Error(
+          `HTTP ${checkinResponse.status}: ${action?.message || 'request failed'}`
+        )
+      }
+
+      if (action?.code) {
+        throw new Error(
+          `${action?.message || 'Checkin failed'} ` +
+          `(code=${action?.code}` +
+          `${action?.reason ? `, reason=${action.reason}` : ''})`
+        )
+      }
+
+      const statusResponse = await fetch(
+        `https://${domain}/api/user/status`,
+        {
+          method: 'GET',
+          headers: common,
+        }
+      )
+
+      const statusText = await statusResponse.text()
+
+      let status
+      try {
+        status = JSON.parse(statusText)
+      } catch {
+        throw new Error(
+          `Status API returned non-JSON response ` +
+          `(HTTP ${statusResponse.status}): ` +
+          statusText.slice(0, 200)
+        )
+      }
+
+      if (!statusResponse.ok) {
+        throw new Error(
+          `Status HTTP ${statusResponse.status}: ` +
+          `${status?.message || 'request failed'}`
+        )
+      }
+
+      if (status?.code) {
+        throw new Error(
+          `${status?.message || 'Status failed'} ` +
+          `(code=${status?.code})`
+        )
+      }
+
+      const leftDays = Number(status?.data?.leftDays)
+
+      console.log(
+        `[GLaDOS] Account ${accountNo}: SUCCESS, Left Days=${leftDays}`
+      )
+
       notice.push(
-        'Checkin Error',
+        `Account ${accountNo} - Checkin OK`,
+        `${action?.message}`,
+        `Left Days ${leftDays}`
+      )
+
+    } catch (error) {
+      hasError = true
+
+      console.error(
+        `[GLaDOS] Account ${accountNo}: ERROR:`,
+        error?.message || error
+      )
+
+      notice.push(
+        `Account ${accountNo} - Checkin Error`,
         `${error}`,
         `<${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}>`
       )
     }
   }
+
+  // 让 GitHub Actions 真正显示失败，
+  // 但先返回 notice，让通知仍然可以发送。
+  if (hasError) {
+    process.exitCode = 1
+  }
+
   return notice
 }
 
-const notify = async (notice) => {
-  if (!process.env.NOTIFY || !notice) return
-  for (const option of String(process.env.NOTIFY).split('\n')) {
-    if (!option) continue
-    try {
-      if (option.startsWith('console:')) {
-        for (const line of notice) {
-          console.log(line)
-        }
-      } else if (option.startsWith('wxpusher:')) {
-        await fetch(`https://wxpusher.zjiecode.com/api/send/message`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            appToken: option.split(':')[1],
-            summary: notice[0],
-            content: notice.join('<br>'),
-            contentType: 3,
-            uids: option.split(':').slice(2),
-          }),
-        })
-      } else if (option.startsWith('pushplus:')) {
-        await fetch(`https://www.pushplus.plus/send`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            token: option.split(':')[1],
-            title: notice[0],
-            content: notice.join('<br>'),
-            template: 'markdown',
-          }),
-        })
-      } else if (option.startsWith('bark:')) {
-        await fetch(`https://api.day.app/${option.split(':')[1]}`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            title: notice[0],
-            body: notice.slice(1).join('\n'),
-          }),
-        })
-      } else if (option.startsWith('qyweixin:')) {
-        const qyweixinToken = option.split(':')[1]
-        const qyweixinNotifyRebotUrl = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=' + qyweixinToken;
-        await fetch(qyweixinNotifyRebotUrl, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            msgtype: 'markdown',
-            markdown: {
-                content: notice.join('<br>')
-            }
-          }),
-        })
-      } else {
-        // fallback
-        await fetch(`https://www.pushplus.plus/send`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            token: option,
-            title: notice[0],
-            content: notice.join('<br>'),
-            template: 'markdown',
-          }),
-        })
-      }
-    } catch (error) {
-      throw error
-    }
-  }
-}
-
 const main = async () => {
-  await notify(await glados())
+  try {
+    const result = await glados()
+    await notify(result)
+  } catch (error) {
+    console.error('[MAIN] Fatal error:', error)
+    process.exitCode = 1
+  }
 }
 
 main()
